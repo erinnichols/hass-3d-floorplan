@@ -1097,9 +1097,13 @@ export class Hass3dFloorplan extends LitElement {
               let state = this._statewithtemplate(entity);
               if (entity.type3d == 'cover') {
                 let toupdate = false;
-                if (hass.states[entity.entity].attributes['current_position']) {
+                if (hass.states[entity.entity].attributes['current_position'] !== undefined) {
                   if (this._position[i] != hass.states[entity.entity].attributes['current_position']) {
                     this._position[i] = hass.states[entity.entity].attributes['current_position'];
+                    toupdate = true;
+                  }
+                  if (state !== this._states[i]) {
+                    this._states[i] = state;
                     toupdate = true;
                   }
                 } else {
@@ -1109,7 +1113,7 @@ export class Hass3dFloorplan extends LitElement {
                   }
                 }
                 if (toupdate) {
-                  this._updatecover(entity, this._states[i], i);
+                  this._updatecover(entity, state, i);
                   torerender = true;
                 }
               }
@@ -3304,7 +3308,7 @@ export class Hass3dFloorplan extends LitElement {
 
     size.subVectors(bbox.max, bbox.min);
 
-    if (doorstate == 'on' || doorstate == 'open') {
+    if (doorstate == 'on' || doorstate == 'open' || doorstate == 'opening' || doorstate == 'closing') {
       if (side == 'left') {
         if (size.x > size.z) {
           translate.z += 0;
