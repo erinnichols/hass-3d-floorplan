@@ -71,6 +71,9 @@ export class Hass3dFloorplan extends LitElement {
   private _selectedobjects: string[];
   private _selectionModeEnabled: boolean;
   private _brightness?: number[];
+  private _glow: any[] = [];
+  private _mediasig: string[] = [];                  // erin patch: media screen change detection
+  private _mediaimgs: { [url: string]: HTMLImageElement } = {};   // erin patch: per-light cloned materials driven as emissive glow
   private _lights?: string[];
   private _rooms?: string[];
   private _sprites?: string[];
@@ -1161,6 +1164,13 @@ export class Hass3dFloorplan extends LitElement {
                 } else {
                   if (this._text[i] != this._statewithtemplate(entity)) {
                     this._text[i] = this._statewithtemplate(entity);
+                    toupdate = true;
+                  }
+                }
+                if (entity.text.picture == 'yes') {
+                  const sig = this._mediasignature(entity);
+                  if (sig !== this._mediasig[i]) {
+                    this._mediasig[i] = sig;
                     toupdate = true;
                   }
                 }
@@ -2727,6 +2737,8 @@ export class Hass3dFloorplan extends LitElement {
 
                   
                   _newobject.name = 'f3dobj_' + _foundobject.name;
+                  // erin patch: media screens draw on the original; a visible clone would z-fight with it
+                  if (entity.text && entity.text.picture == 'yes') _newobject.visible = false;
                   
                   this._levels[_foundobject.userData.level].add(_newobject);
                 });
@@ -3128,10 +3140,143 @@ export class Hass3dFloorplan extends LitElement {
     const _foundobject: any = this._scene.getObjectByName(entity.object_id);
 
     if (_foundobject) {
-      this._updateTextCanvas(entity.text, canvas, state + uom);
+      if (entity.text.picture == 'yes') {
+        this._drawmedia(entity, canvas, _foundobject);
+      } else {
+        this._updateTextCanvas(entity.text, canvas, state + uom);
+      }
       this._applyTextCanvas(canvas, _foundobject);
+      if (entity.text.picture == 'yes') {
+        // a screen emits light: don't let the renderer's exposure (0.6) dim it like a lit surface
+        const m: any = _foundobject.material;
+        if (m && m.toneMapped !== false) {
+          m.toneMapped = false;
+          m.needsUpdate = true;
+        }
+      }
     }
   }
+
+  // ---- erin patch: media screen -----------------------------------------------------------
+  // type3d: text with text.picture: 'yes' draws what a media player is showing onto the object
+  // (a flat plane with UVs; make_card_config.py makes one): the entity's cover art / thumbnail
+  // (entity_picture), dimmed toward the bottom, with the title and an optional subtitle on top.
+  //   text: { picture: 'yes', attribute: media_title, subtitle_attribute: media_artist,
+  //           aspect: 1.78, font: 'sans-serif', textfgcolor: 'white', textbgcolor: '#000' }
+  private _mediasignature(entity: any): string {
+    const st: any = this._hass && this._hass.states[entity.entity];
+    const a: any = st ? st.attributes : {};
+    const o = entity.text;
+    return [
+      st ? st.state : '',
+      a[o.attribute || 'media_title'],
+      o.subtitle_attribute ? a[o.subtitle_attribute] : '',
+      a.entity_picture,
+    ].join('|');
+  }
+
+  private _wraplines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
+    const words = text.split(/\s+/).filter((w) => w.length);
+    const lines: string[] = [];
+    let line = '';
+    for (let n = 0; n < words.length; n++) {
+      const test = line ? line + ' ' + words[n] : words[n];
+      if (ctx.measureText(test).width > maxWidth && line) {
+        lines.push(line);
+        line = words[n];
+        if (lines.length == maxLines) break;
+      } else {
+        line = test;
+      }
+    }
+    if (lines.length < maxLines && line) lines.push(line);
+    if (lines.length == maxLines && words.join(' ').length > lines.join(' ').length) {
+      let last = lines[maxLines - 1];
+      while (last.length > 1 && ctx.measureText(last + '…').width > maxWidth) last = last.slice(0, -1);
+      lines[maxLines - 1] = last + '…';
+    }
+    return lines;
+  }
+
+  private _drawmedia(entity: any, canvas: HTMLCanvasElement, obj: any): void {
+    const o = entity.text;
+    const st: any = this._hass && this._hass.states[entity.entity];
+    const a: any = st ? st.attributes : {};
+    const title = a[o.attribute || 'media_title'] ? String(a[o.attribute || 'media_title']) : '';
+    const sub = o.subtitle_attribute && a[o.subtitle_attribute] ? String(a[o.subtitle_attribute]) : '';
+    let pic: string = a.entity_picture ? String(a.entity_picture) : '';
+    if (pic && this._hass.hassUrl) pic = this._hass.hassUrl(pic);
+    const aspect = o.aspect ? Number(o.aspect) : 16 / 9;
+    const w = 1024;
+    const h = Math.round(w / aspect);
+    if (canvas.width != w || canvas.height != h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    const ctx = canvas.getContext('2d');
+    const font = o.font ? o.font : 'sans-serif';
+    const paint = (img: HTMLImageElement | null) => {
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = o.textbgcolor ? o.textbgcolor : '#000000';
+      ctx.fillRect(0, 0, w, h);
+      if (img && img.naturalWidth) {
+        const k = Math.max(w / img.naturalWidth, h / img.naturalHeight); // cover-fit
+        const dw = img.naturalWidth * k;
+        const dh = img.naturalHeight * k;
+        ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+      }
+      if (title) {
+        const grad = ctx.createLinearGradient(0, h * 0.45, 0, h);
+        grad.addColorStop(0, 'rgba(0,0,0,0)');
+        grad.addColorStop(1, 'rgba(0,0,0,0.85)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, h * 0.45, w, h * 0.55);
+        const tsize = Math.round(h * 0.085);
+        const ssize = Math.round(h * 0.055);
+        ctx.fillStyle = o.textfgcolor ? o.textfgcolor : 'white';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.font = 'bold ' + tsize + 'px ' + font;
+        const lines = this._wraplines(ctx, title, w * 0.88, 2);
+        let y = h - h * 0.06 - (sub ? ssize * 1.4 : 0) - (lines.length - 1) * tsize * 1.15;
+        lines.forEach((l, idx) => ctx.fillText(l, w * 0.06, y + idx * tsize * 1.15));
+        if (sub) {
+          ctx.font = ssize + 'px ' + font;
+          ctx.globalAlpha = 0.8;
+          ctx.fillText(this._wraplines(ctx, sub, w * 0.88, 1)[0] || '', w * 0.06, h - h * 0.06);
+          ctx.globalAlpha = 1;
+        }
+      }
+    };
+    const refresh = () => {
+      const mat: any = obj.material;
+      if (mat && mat.map) mat.map.needsUpdate = true;
+      this._render();
+    };
+    paint(null);
+    if (pic) {
+      const cached = this._mediaimgs[pic];
+      if (cached && cached.complete && cached.naturalWidth) {
+        paint(cached);
+      } else {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          this._mediaimgs[pic] = img;
+          const cur: any = this._hass && this._hass.states[entity.entity];
+          const curpic = cur && cur.attributes.entity_picture ? String(cur.attributes.entity_picture) : '';
+          const full = curpic && this._hass.hassUrl ? this._hass.hassUrl(curpic) : curpic;
+          if (full == pic) {
+            paint(img);
+            refresh();
+          }
+        };
+        img.onerror = () => console.warn('hass-3d-floorplan: could not load artwork for ' + entity.entity);
+        img.src = pic;
+      }
+    }
+  }
+  // ---- end erin patch ---------------------------------------------------------------------
 
   private _updatelight(entity: Hass3dFloorplanConfig, i: number): void {
     
@@ -3176,7 +3321,80 @@ export class Hass3dFloorplan extends LitElement {
       }
       this._renderer.shadowMap.needsUpdate = true;
     });
+    this._updateglow(entity, i);
   }
+
+  // ---- erin patch: glow -------------------------------------------------------------------
+  // light: { glow: '<object_group>' | 'object_id', glow_intensity: 1, glow_opacity: 0.6, glow_tint: 'yes' }
+  // While the light is on, the named meshes glow in the light's color (emissive), scaled by its
+  // brightness. glow_tint multiplies the base color by the light color so a white shell reads as
+  // that color; glow_opacity lifts nearly-transparent glass to at least that opacity while lit.
+  // Materials are cloned per mesh first, so SketchUp materials shared with other objects stay put.
+  private _glowobjectids(spec: string): string[] {
+    if (spec.charAt(0) == '<' && spec.charAt(spec.length - 1) == '>') {
+      const name = spec.substr(1, spec.length - 2);
+      const g = (this._config.object_groups || []).find((x: any) => x.object_group == name);
+      return g ? g.objects.map((o: any) => o.object_id) : [];
+    }
+    return [spec];
+  }
+
+  private _updateglow(entity: Hass3dFloorplanConfig, i: number): void {
+    const spec = entity.light && entity.light.glow;
+    if (!spec) return;
+    if (!this._glow[i]) {
+      const entries: any[] = [];
+      this._glowobjectids(String(spec)).forEach((id) => {
+        const root: any = this._scene.getObjectByName(id);
+        if (!root) {
+          console.warn('hass-3d-floorplan: glow object not found: ' + id);
+          return;
+        }
+        root.traverse((o: any) => {
+          if (!o.isMesh || !o.material) return;
+          const mats: any[] = Array.isArray(o.material) ? o.material : [o.material];
+          const clones = mats.map((m: any) => m.clone());
+          o.material = Array.isArray(o.material) ? clones : clones[0];
+          clones.forEach((m: any) =>
+            entries.push({
+              mat: m,
+              color: m.color ? m.color.clone() : null,
+              opacity: m.opacity,
+              transparent: m.transparent,
+            }),
+          );
+        });
+      });
+      this._glow[i] = entries;
+    }
+    const on = this._states[i] == 'on';
+    let glowColor = new THREE.Color('#ffffff');
+    if (this._color[i]) {
+      glowColor = new THREE.Color(this._RGBToHex(this._color[i][0], this._color[i][1], this._color[i][2]));
+    } else if (entity.light.color && entity.light.color != 'rgb') {
+      glowColor = new THREE.Color(entity.light.color);
+    }
+    const level = this._brightness[i] != -1 ? this._brightness[i] / 255 : 1;
+    const gi = entity.light.glow_intensity !== undefined ? Number(entity.light.glow_intensity) : 1;
+    const gop = entity.light.glow_opacity !== undefined ? Number(entity.light.glow_opacity) : null;
+    const tint = entity.light.glow_tint != 'no';
+    this._glow[i].forEach((e: any) => {
+      const m = e.mat;
+      if (on) {
+        if (m.emissive) {
+          m.emissive.copy(glowColor);
+          m.emissiveIntensity = gi * level;
+        }
+        if (tint && e.color) m.color.copy(e.color).multiply(glowColor);
+        if (gop !== null && e.transparent) m.opacity = Math.max(e.opacity, gop * (0.4 + 0.6 * level));
+      } else {
+        if (m.emissive) m.emissiveIntensity = 0;
+        if (e.color) m.color.copy(e.color);
+        m.opacity = e.opacity;
+      }
+    });
+  }
+  // ---- end erin patch ---------------------------------------------------------------------
 
   private _manage_light_shadows(entity: Hass3dFloorplanConfig, light: THREE.Light): void {
     if (this._config.shadow == 'yes') {
